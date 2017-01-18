@@ -41,7 +41,6 @@ const omittedCloseTags = {
 };
 
 function createOpenTagMarkup(type, props, id, isRootElement) {
-  const STYLE = 'style';
   let out = `<${type}`;
 
   for (let propKey in props) {
@@ -50,7 +49,7 @@ function createOpenTagMarkup(type, props, id, isRootElement) {
       continue;
     }
 
-    if (propKey === STYLE) {
+    if (propKey === 'style') {
       propValue = createMarkupForStyles(propValue);
     }
 
@@ -113,6 +112,21 @@ function resolve(child, context) {
   return {child, context};
 }
 
+function getNonChildrenInnerMarkup(props) {
+  const innerHTML = props.dangerouslySetInnerHTML;
+  if (innerHTML != null) {
+    if (innerHTML.__html != null) {
+      return innerHTML.__html;
+    }
+  } else {
+    const content = props.children;
+    if (typeof content === 'string' || typeof content === 'number') {
+      return escapeTextContentForBrowser(content);
+    }
+  }
+  return null;
+}
+
 class ReactDOMServerRenderer {
   constructor(element) {
     this.stack = [{
@@ -139,106 +153,84 @@ class ReactDOMServerRenderer {
         continue;
       }
       const child = frame.children[frame.childIndex++];
-      const data = this.render(child, frame.context);
-      if (data) {
-        out += data;
-      }
+      const context = frame.context;
 
-    }
-    
-    return out;
-  }
-
-  render(child, context) {
-
-    while(true) {
       if (typeof child === 'string' || typeof child === 'number') {
-        return (
+        out += (
           '<!-- react-text: ' + this.idCounter++ + ' -->' +
           escapeTextContentForBrowser('' + child) +
           '<!-- /react-text -->'
         );
       } else if (child === null || child === false) {
-        return '<!-- react-empty: ' + this.idCounter++ + ' -->';
+        out += '<!-- react-empty: ' + this.idCounter++ + ' -->';
+      } else if (child === undefined) {
+        throw new Error('Cannot render undefined')
       } else if (Array.isArray(child)) {
+        // no need to push a new frame since context and footer is the same
+        frame.children.push(...child);
+      } else if (typeof child.type === 'string') {
+        const tag = child.type.toLowerCase();
+        let props = child.props;
+        if (tag === 'input') {
+          props = Object.assign({
+            type: undefined,
+          }, props);
+        } else if (tag === 'textarea') {
+          props = Object.assign({}, props, {
+            value: undefined,
+            children: props.value,
+          });
+        }
+        const id = this.idCounter++;
+        let html = createOpenTagMarkup(
+          tag,
+          props,
+          id,
+          id === 1
+        );
+        let footer = '';
+        if (omittedCloseTags.hasOwnProperty(tag)) {
+          html += '/>';
+        } else {
+          html += '>';
+          footer = '</' + tag + '>';
+        }
+
+        const children = [];
+        const innerMarkup = getNonChildrenInnerMarkup(props);
+        if (innerMarkup != null) {
+          html += innerMarkup;
+        } else {
+          traverseAllChildren(props.children, (ctx, child, name) => {
+            if (child != null) {
+              children.push(child);
+            }
+          });
+        }
+        // pushing new frame since footer may have changed
         this.stack.push({
-          children: child,
+          children: children,
           childIndex: 0,
           context: context,
+          footer: footer,
+        });
+        out += html;
+      } else if (typeof child.type === 'function') {
+        const { child: newChild, context: newContext } = resolve(child, context);
+        this.stack.push({
+          children: [newChild],
+          childIndex: 0,
+          context: newContext,
           footer: '',
         });
-        break;
-      } else if (typeof child.type === 'string') {
-        return this.renderDOM(child, context);
-      } else if (typeof child.type === 'function') {
-        ({child, context} = resolve(child, context));
       } else {
+        console.log('cannot render', child)
         throw new Error('Cannot render child: ' + child);
       }
     }
-  }
 
-  renderDOM(element, context) {
-    const tag = element.type.toLowerCase();
-    let props = element.props;
-    if (tag === 'input') {
-      props = Object.assign({
-        type: undefined,
-      }, props);
-    } else if (tag === 'textarea') {
-      props = Object.assign({}, props, {
-        value: undefined,
-        children: props.value,
-      });
-    }
-    const id = this.idCounter++;
-    let out = createOpenTagMarkup(
-      tag,
-      props,
-      id,
-      id === 1
-    );
-    let footer = '';
-    if (omittedCloseTags.hasOwnProperty(tag)) {
-      out += '/>';
-    } else {
-      out += '>';
-      footer = '</' + tag + '>';
-    }
-    const children = [];
-    const innerMarkup = getNonChildrenInnerMarkup(props);
-    if (innerMarkup != null) {
-      out += innerMarkup;
-    } else {
-      traverseAllChildren(props.children, (ctx, child, name) => {
-        if (child != null) {
-          children.push(child);
-        }
-      });
-    }
-    this.stack.push({
-      children,
-      childIndex: 0,
-      context: context,
-      footer: footer,
-    });
     return out;
   }
-}
-
-function getNonChildrenInnerMarkup(props) {
-  const innerHTML = props.dangerouslySetInnerHTML;
-  if (innerHTML != null) {
-    if (innerHTML.__html != null) {
-      return innerHTML.__html;
-    }
-  } else {
-    const content = props.children;
-    if (typeof content === 'string' || typeof content === 'number') {
-      return escapeTextContentForBrowser(content);
-    }
-  }
-  return null;
 }
 
 const ReactDOMServerRendering = {
@@ -278,7 +270,7 @@ const ReactDOMServerRendering = {
       }
     }
 
-    class Stream extends Transform {
+    class Stream extends Readable {
       _read(bytes) {
         const data = renderer.read(bytes);
         this.push(data);
